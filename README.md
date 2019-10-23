@@ -1,7 +1,7 @@
 # `pynterp`: Interpretable Machine Learning in Python
 
-The bottleneck to deploying machine learning, and to its use more broadly in a great range
-of problems in business in society, is a lack of interpretability and the notion that "we can't trust this black-box".
+The bottleneck to deploying machine learning, and therefore its use more broadly in a great range
+of problems in business and society, is a lack of interpretability. This is the sentiment "we can't trust this black-box".
 This repository aims to replicate various interpretable machine learning algorithms for their broad use and dissemination.
 
 ## Installation
@@ -25,3 +25,9 @@ ds.fit(X_train, y_train)
 Rules-based methods are models that learn a list or set of IF-THEN-ELSE rules;
 they are highly interpretable and appealing to humans. The current implementation
 of `DecisionSet` follows the [paper by Lakkaraju et. al](https://www-cs-faculty.stanford.edu/people/jure/pubs/interpretable-kdd16.pdf).
+
+## TODO
+
+*October 23, 2019*:
+- Implement test suite and continuous integration framework
+- Incorporate Bayesian decision lists (due to Rudin et. al)
