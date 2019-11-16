@@ -97,7 +97,7 @@ class DecisionSet():
         self.lambdas = lambdas
         assert len(self.lambdas) == 7, '`lambdas` must be exactly length 7!'
 
-    def fit(self, X, y, d1=1/3, d2=1/3, d3=-1):
+    def fit(self, X, y, d1=1/3, d2=1/3, d3=-1, max_est_iter=10):
         """
         Fits a DecisionSet to a dataset X (one-hot encoded) with labels y (categorical)
 
@@ -106,13 +106,14 @@ class DecisionSet():
                X should have shape (n, p) where n is number of points and p is number of features
             y: pandas Series containing class labels
             d*: delta parameters. d1 : delta, d2/d3 : delta' (two settings)
+            max_est_iter: maximum iterations for estimating w
         """
         itemsets = self.mine_itemsets(X)
         self.L_max = np.max(itemsets.apply(lambda x: len(x)))
         self.default_pred = y.value_counts().idxmax()
 
         # two runs each with different d' (d2 vs d3)
-        dset1, obj_val1, dset2, obj_val2 = self.smooth_local_search(X, y, itemsets, d1=d1, d2=d2, d3=d3)
+        dset1, obj_val1, dset2, obj_val2 = self.smooth_local_search(X, y, itemsets, d1=d1, d2=d2, d3=d3, max_est_iter=max_est_iter)
 
         # take best of both runs
         if obj_val1 > obj_val2:
@@ -151,20 +152,23 @@ class DecisionSet():
         except:
             raise RuntimeError('Must fit decision set before predicting!')
 
+        items = list(self.decision_set['item'])
+        classes = list(self.decision_set['class'])
+
         preds = []
         for i, x in X.iterrows():
             added = False
-            for j, r in self.decision_set.iterrows(): # sorted by some notion of how good the rule is (breaks ties)
-                rule_value = x.loc[r['item']]
+            for r, c in zip(items, classes): # sorted by some notion of how good the rule is (breaks ties)
+                rule_value = x.loc[r]
                 if (rule_value==1).all():
-                    preds.append(r['class'])
+                    preds.append(c)
                     added = True
                     break
             if not added:
                 preds.append(self.default_pred) # if no match, use default
         return np.array(preds)
 
-    def smooth_local_search(self, X, y, itemsets, d1=1/3, d2=1/3, d3=-1):
+    def smooth_local_search(self, X, y, itemsets, d1=1/3, d2=1/3, d3=-1, max_est_iter=10):
         """
         Performs smooth local search to optimize decision set
         """
@@ -181,19 +185,20 @@ class DecisionSet():
         self.overlap_cache = {}
         for i, ri in itemsets.iteritems():
             for j, rj in itemsets.loc[i:].iteritems():
-                self.overlap_cache[(ri,rj)] = len(overlap(X, ri, rj))
+                ov = len(overlap(X, ri, rj))
+                self.overlap_cache[(ri,rj)] = ov
+                self.overlap_cache[(rj,ri)] = ov # save both orders for ease of use
 
-        # cache the correct covers (cache the actual set)
+        # cache correct cover indices as python set
         self.correct_cover_cache = {}
         for i, r in domain.iterrows():
-            # print(len(correct_cover(X, y, r)[0]))
-            self.correct_cover_cache[(r['item'], r['class'])] = correct_cover(X, y, r)
+            xcov, ycov = correct_cover(X, y, r)
+            self.correct_cover_cache[(r['item'], r['class'])] = set(xcov.index)
 
         # cache incorrect cover (just cache the length)
         self.incorrect_cover_cache = {}
         for i, r in domain.iterrows():
             self.incorrect_cover_cache[(r['item'], r['class'])] = len(incorrect_cover(X, y, r)[0])
-        print('Done')
 
         # initialize an empty decision set
         A = pd.DataFrame([], columns=['item', 'class'])
@@ -207,8 +212,7 @@ class DecisionSet():
 
         while True:
             print('Estimating w...')
-            w = self._estimate_w(domain, A, X, y, itemsets, d1=d1)
-            print('Done')
+            w = self._estimate_w(domain, A, X, y, itemsets, d1=d1, maxiter=max_est_iter)
             # print('w = {}'.format(w))
 
             print('Adding elements to A ')
@@ -328,7 +332,7 @@ class DecisionSet():
         f1 = S - R
 
         # interpretability: short rules
-        f2 = self.L_max * S - sum([len(r['item']) for i, r in decision_set.iterrows()])
+        f2 = self.L_max * S - sum([len(r) for r in list(decision_set['item'])])
 
         # non-overlap: discourage overlap among rules
         f3, f4 = self._non_overlap_objective(X, itemsets, decision_set)
@@ -357,13 +361,13 @@ class DecisionSet():
         # calculate overlap for same and different classes separately
         same_class_overlap, diff_class_overlap = 0, 0
 
-        for (i, (idx_i, ri)) in enumerate(decision_set.iterrows()):
-            for (j, (idx_j, rj)) in enumerate(decision_set.iloc[i:].iterrows()):
-                try:
-                    num_overlap = self.overlap_cache[(ri['item'], rj['item'])]
-                except:
-                    num_overlap = self.overlap_cache[(rj['item'], ri['item'])]
-                if ri['class'] == rj['class']:
+        items = list(decision_set['item'])
+        classes = list(decision_set['class'])
+
+        for i, ri in enumerate(items):
+            for j, rj in enumerate(items[i:]):
+                num_overlap = self.overlap_cache[(ri, rj)]
+                if classes[i] == classes[j]:
                     same_class_overlap += num_overlap
                 else:
                     diff_class_overlap += num_overlap
@@ -393,9 +397,12 @@ class DecisionSet():
         S = len(itemsets)
         R = len(decision_set)
 
+        items = list(decision_set['item'])
+        classes = list(decision_set['class'])
+
         penalty = 0
-        for i, r in decision_set.iterrows():
-            penalty += self.incorrect_cover_cache[(r['item'], r['class'])]
+        for r, c in zip(items, classes):
+            penalty += self.incorrect_cover_cache[(r, c)]
 
         return N * (S ** 2) - penalty
 
@@ -403,14 +410,15 @@ class DecisionSet():
         """
         calculates recall objective (f7 in paper)
         """
-        xcov, ycov = correct_cover(X, y, decision_set.iloc[0])
-        idx = xcov.index
-        for (j, r) in decision_set.iloc[1:].iterrows():
-            xcov, ycov = self.correct_cover_cache[(r['item'], r['class'])]
-            idx = idx.union(xcov.index)
+        items = list(decision_set['item'])
+        classes = list(decision_set['class'])
+
+        idx = self.correct_cover_cache[(items[0], classes[0])]
+        idx = idx.union(*[self.correct_cover_cache[(r, c)] for r, c in zip(items[1:], classes[1:])])
+
         return len(idx)
 
-    def _estimate_w(self, domain, A, X, y, itemsets, d1=1/3, maxiter=50):
+    def _estimate_w(self, domain, A, X, y, itemsets, d1=1/3, maxiter=10):
         """
         performs the w estimation from line 5 of algorithm
         """
@@ -444,3 +452,4 @@ class DecisionSet():
         i.e. keeps the "best"
         """
         self.decision_set = self.decision_set.loc[self.decision_set['item'].drop_duplicates(keep='first').index]
+
